@@ -1,6 +1,4 @@
 
-
-// index.jsx
 import React, { useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -279,12 +277,31 @@ export default function MegaDesdobramentoApp() {
 
   const removedCount = desdobramento.length - filtered.length;
 
-  function calcularProvaveis() {
-    if (!apiDraws.length) return alert("Atualize os concursos primeiro.");
+  /**
+   * CORREÇÃO:
+   * A função agora é assíncrona e tenta buscar os concursos mais recentes
+   * se o estado 'apiDraws' estiver vazio, garantindo que os dados
+   * existam antes de calcular a frequência.
+   */
+  async function calcularProvaveis() {
+    setLoading(true);
+    let currentDraws = apiDraws;
+    
+    // Se o estado 'apiDraws' estiver vazio, chama 'fetchDraws' e espera o resultado.
+    if (!currentDraws.length) {
+      currentDraws = await fetchDraws();
+    }
+    
+    if (!currentDraws.length) {
+      setLoading(false);
+      return alert("Não foi possível obter dados históricos para calcular a frequência. Por favor, tente novamente.");
+    }
+    
     const freq = Array(61).fill(0);
-    apiDraws.forEach(d => d.dezenas.forEach(n => freq[n]++));
+    currentDraws.forEach(d => d.dezenas.forEach(n => freq[n]++));
     const ranked = [...Array(60).keys()].map(n=>n+1).sort((a,b)=>freq[b]-freq[a]);
     setNumerosProvaveis(ranked.slice(0,30));
+    setLoading(false);
   }
 
   return (
@@ -306,6 +323,7 @@ export default function MegaDesdobramentoApp() {
           />
         </label>
         <div className="flex gap-2">
+          {/* O botão agora chama a função assíncrona e robusta */}
           <button type="button" onClick={calcularProvaveis} className="px-4 py-2 rounded bg-purple-600 text-white">Números Prováveis (30+)</button>
           <button type="submit" disabled={loading} className="px-4 py-2 rounded bg-blue-600 text-white flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}Gerar desdobramento</button>
           <button type="button" onClick={fetchDraws} disabled={loading} className="px-4 py-2 rounded bg-gray-200 flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-gray-600 border-t-transparent rounded-full animate-spin"></span>}Atualizar concursos (fetch)</button>
@@ -400,4 +418,3 @@ export default function MegaDesdobramentoApp() {
 const appRoot = document.querySelector( "#app_root" );
 !appRoot ? console.error( "appRoot not found" )
   : createRoot( appRoot ).render( <MegaDesdobramentoApp /> );
-

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { createRoot } from "react-dom/client";
 
 // MegaDesdobramentoApp.jsx
 // Single-file React component (Tailwind-ready)
@@ -78,6 +79,7 @@ export default function MegaDesdobramentoApp() {
   const [filtered, setFiltered] = useState([]);
   const [apiDraws, setApiDraws] = useState([]); // draws from API
   const [drawDate, setDrawDate] = useState(""); // yyyy-mm-ddThh:mm
+  const [numerosProvaveis, setNumerosProvaveis] = useState([]);
   const [resultsChecked, setResultsChecked] = useState([]);
   const [loading, setLoading] = useState(false);
   const STORAGE_KEY = "mega_desdobramento_games";
@@ -213,6 +215,12 @@ export default function MegaDesdobramentoApp() {
     const draws = await fetchDraws();
     const final = aplicarFiltros(combs, draws);
     setFiltered(final);
+    // salvar entrada completa no histórico
+    const historyKey = "mega_desdobramento_history";
+    const entry = { inputNumbers: unique, totalCombinacoes: combs.length, totalFiltradas: final.length, totalRemovidas: combs.length - final.length, geradoEm: new Date().toISOString() };
+    const prev = JSON.parse(localStorage.getItem(historyKey) || "[]");
+    prev.push(entry);
+    localStorage.setItem(historyKey, JSON.stringify(prev));
     // salvar em localStorage
     localStorage.setItem(STORAGE_KEY, JSON.stringify(final));
     setLoading(false);
@@ -268,6 +276,33 @@ export default function MegaDesdobramentoApp() {
 
   const removedCount = desdobramento.length - filtered.length;
 
+  /**
+   * CORREÇÃO:
+   * A função agora é assíncrona e tenta buscar os concursos mais recentes
+   * se o estado 'apiDraws' estiver vazio, garantindo que os dados
+   * existam antes de calcular a frequência.
+   */
+  async function calcularProvaveis() {
+    setLoading(true);
+    let currentDraws = apiDraws;
+    
+    // Se o estado 'apiDraws' estiver vazio, chama 'fetchDraws' e espera o resultado.
+    if (!currentDraws.length) {
+      currentDraws = await fetchDraws();
+    }
+    
+    if (!currentDraws.length) {
+      setLoading(false);
+      return alert("Não foi possível obter dados históricos para calcular a frequência. Por favor, tente novamente.");
+    }
+    
+    const freq = Array(61).fill(0);
+    currentDraws.forEach(d => d.dezenas.forEach(n => freq[n]++));
+    const ranked = [...Array(60).keys()].map(n=>n+1).sort((a,b)=>freq[b]-freq[a]);
+    setNumerosProvaveis(ranked.slice(0,30));
+    setLoading(false);
+  }
+
   return (
     <div className="max-w-4xl mx-auto p-6">
       <h1 className="text-2xl font-bold mb-4">Mega-Sena — Gerador de Desdobramento</h1>
@@ -287,15 +322,18 @@ export default function MegaDesdobramentoApp() {
           />
         </label>
         <div className="flex gap-2">
-          <button type="submit" className="px-4 py-2 rounded bg-blue-600 text-white">Gerar desdobramento</button>
-          <button type="button" onClick={fetchDraws} className="px-4 py-2 rounded bg-gray-200">Atualizar concursos (fetch)</button>
+          {/* O botão agora chama a função assíncrona e robusta */}
+          <button type="button" onClick={calcularProvaveis} className="px-4 py-2 rounded bg-purple-600 text-white">Números Prováveis (30+)</button>
+          <button type="submit" disabled={loading} className="px-4 py-2 rounded bg-blue-600 text-white flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}Gerar desdobramento</button>
+          <button type="button" onClick={fetchDraws} disabled={loading} className="px-4 py-2 rounded bg-gray-200 flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-gray-600 border-t-transparent rounded-full animate-spin"></span>}Atualizar concursos (fetch)</button>
           <button type="button" onClick={downloadJSON} className="px-4 py-2 rounded bg-green-600 text-white">Baixar JSON</button>
           <button type="button" onClick={clearStorage} className="px-4 py-2 rounded bg-red-500 text-white">Limpar</button>
         </div>
       </form>
 
       <div className="mb-4">
-        <strong>Quantidade de números escolhidos: </strong>{numbers.length}
+        <strong>Quantidade de números escolhidos: </strong>{numbers.length}<br/>
+        <strong>Números escolhidos: </strong>{numbers.join(", ")} 
         <br />
         <strong>Combinações geradas (C(n,6)): </strong>{desdobramento.length}
         <br />
@@ -318,7 +356,7 @@ export default function MegaDesdobramentoApp() {
         <p className="text-sm text-gray-600 mb-2">Defina a data/hora do sorteio (opcional) ou clique para checar o último concurso agora:</p>
         <div className="flex gap-2 mb-2">
           <input type="datetime-local" value={drawDate} onChange={(e)=>setDrawDate(e.target.value)} className="rounded border p-2" />
-          <button type="button" onClick={handleCheckResults} className="px-4 py-2 rounded bg-indigo-600 text-white">Checar agora</button>
+          <button type="button" onClick={handleCheckResults} disabled={loading} className="px-4 py-2 rounded bg-indigo-600 text-white flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}Checar agora</button>
         </div>
         <div className="text-sm text-gray-600">
           {drawDate && new Date(drawDate) > new Date() ? (
@@ -349,8 +387,19 @@ export default function MegaDesdobramentoApp() {
                   <div key={i} className="p-2 border rounded">{c.combo.join(", ")} — {c.hits} acertos</div>
                 ))}
               </div>
-            </div>
+
+      {numerosProvaveis.length > 0 && (
+        <div className="mt-6 p-4 border rounded bg-purple-50">
+          <h3 className="font-semibold mb-2">30 números mais prováveis</h3>
+          <p className="text-sm mb-2 text-gray-700">Com base na frequência histórica.</p>
+          <div className="grid grid-cols-6 gap-2 text-center">
+            {numerosProvaveis.map((n,i)=>(
+              <div key={i} className="p-2 bg-white border rounded">{n}</div>
+            ))}
           </div>
+        </div>
+      )}
+    </div></div>
         )}
       </div>
 
@@ -364,3 +413,7 @@ export default function MegaDesdobramentoApp() {
     </div>
   );
 }
+
+const appRoot = document.querySelector( "#app_root" );
+!appRoot ? console.error( "appRoot not found" )
+  : createRoot( appRoot ).render( <MegaDesdobramentoApp /> );
