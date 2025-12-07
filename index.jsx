@@ -73,6 +73,14 @@ function comboKey(combo) {
   return combo.slice().sort((a, b) => a - b).join(",");
 }
 
+const API_ENDPOINTS = [
+    "https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena",
+    "https://api.guidi.dev.br/loteria/megasena",
+    "https://lottolookup.com.br/api/megasena",
+    "https://apiloterias.com.br/megasena",
+];
+
+
 export default function MegaDesdobramentoApp() {
   const [input, setInput] = useState("");
   const [numbers, setNumbers] = useState([]);
@@ -83,6 +91,7 @@ export default function MegaDesdobramentoApp() {
   const [numerosProvaveis, setNumerosProvaveis] = useState([]);
   const [resultsChecked, setResultsChecked] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [apiTestResult, setApiTestResult] = useState(null); // NOVO ESTADO
   const STORAGE_KEY = "mega_desdobramento_games";
 
   useEffect(() => {
@@ -101,14 +110,7 @@ export default function MegaDesdobramentoApp() {
   // tentativa de buscar resultados históricos (usaremos esta lista para filtrar combinações já sorteadas)
   async function fetchDraws() {
     setLoading(true);
-    const endpoints = [
-      // Caixa oficial (padrão)
-      "https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena",
-      // fallback (APIs públicas que replicam dados da Caixa)
-      "https://api.guidi.dev.br/loteria/megasena",
-      "https://lottolookup.com.br/api/megasena",
-      "https://apiloterias.com.br/megasena",
-    ];
+    const endpoints = API_ENDPOINTS; // Usando a constante de endpoints
     let draws = [];
     for (const url of endpoints) {
       try {
@@ -277,12 +279,7 @@ export default function MegaDesdobramentoApp() {
 
   const removedCount = desdobramento.length - filtered.length;
 
-  /**
-   * CORREÇÃO:
-   * A função agora é assíncrona e tenta buscar os concursos mais recentes
-   * se o estado 'apiDraws' estiver vazio, garantindo que os dados
-   * existam antes de calcular a frequência.
-   */
+  // CORREÇÃO: Função para calcular prováveis de forma robusta e assíncrona
   async function calcularProvaveis() {
     setLoading(true);
     let currentDraws = apiDraws;
@@ -304,6 +301,38 @@ export default function MegaDesdobramentoApp() {
     setLoading(false);
   }
 
+  // NOVA FUNÇÃO: Testa o status de conexão das APIs
+  async function handleTestApi() {
+    setLoading(true);
+    const endpoints = API_ENDPOINTS;
+    let successUrl = null;
+    let errorDetails = [];
+
+    for (const url of endpoints) {
+        try {
+            // Usa o método HEAD para checar o status sem baixar o corpo
+            const res = await fetch(url, { method: "HEAD", cache: "no-store" }); 
+            if (res.ok) {
+                successUrl = url;
+                break;
+            } else {
+                errorDetails.push(`URL: ${url} | Status HTTP: ${res.status}`);
+            }
+        } catch (e) {
+            // Captura erros de rede/CORS
+            errorDetails.push(`URL: ${url} | Erro de Rede/CORS: ${e.message}`);
+        }
+    }
+    
+    setLoading(false);
+
+    if (successUrl) {
+        setApiTestResult({ status: 'Sucesso', url: successUrl });
+    } else {
+        setApiTestResult({ status: 'Falha', details: errorDetails });
+    }
+  }
+
   return (
     <div className="max-w-4xl mx-auto p-6">
       <h1 className="text-2xl font-bold mb-4">Mega-Sena — Gerador de Desdobramento</h1>
@@ -322,15 +351,38 @@ export default function MegaDesdobramentoApp() {
             className="mt-1 block w-full rounded-md border p-2"
           />
         </label>
-        <div className="flex gap-2">
-          {/* O botão agora chama a função assíncrona e robusta */}
-          <button type="button" onClick={calcularProvaveis} className="px-4 py-2 rounded bg-purple-600 text-white">Números Prováveis (30+)</button>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={calcularProvaveis} disabled={loading} className="px-4 py-2 rounded bg-purple-600 text-white flex items-center gap-2 disabled:opacity-50">Números Prováveis (30+)</button>
           <button type="submit" disabled={loading} className="px-4 py-2 rounded bg-blue-600 text-white flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}Gerar desdobramento</button>
           <button type="button" onClick={fetchDraws} disabled={loading} className="px-4 py-2 rounded bg-gray-200 flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-gray-600 border-t-transparent rounded-full animate-spin"></span>}Atualizar concursos (fetch)</button>
+          
+          {/* NOVO BOTÃO DE TESTE */}
+          <button type="button" onClick={handleTestApi} disabled={loading} className="px-4 py-2 rounded bg-yellow-600 text-white flex items-center gap-2 disabled:opacity-50">Testar APIs</button>
+          
           <button type="button" onClick={downloadJSON} className="px-4 py-2 rounded bg-green-600 text-white">Baixar JSON</button>
           <button type="button" onClick={clearStorage} className="px-4 py-2 rounded bg-red-500 text-white">Limpar</button>
         </div>
       </form>
+
+      {/* NOVO DISPLAY DE RESULTADO DO TESTE DE API */}
+      {apiTestResult && (
+        <div className={`p-3 rounded mb-4 ${apiTestResult.status === 'Sucesso' ? 'bg-green-100 border-green-400' : 'bg-red-100 border-red-400'} border-l-4`}>
+          <h2 className="font-bold text-lg mb-1">Resultado do Teste de API: <span className={apiTestResult.status === 'Sucesso' ? 'text-green-700' : 'text-red-700'}>{apiTestResult.status}</span></h2>
+          {apiTestResult.status === 'Sucesso' ? (
+            <p className="text-sm">Conexão bem-sucedida com a URL: <strong>{apiTestResult.url}</strong></p>
+          ) : (
+            <>
+              <p className="text-sm text-red-700 font-semibold mb-1">Nenhuma API respondeu corretamente. Detalhes das falhas:</p>
+              <ul className="list-disc pl-5 text-xs text-red-700">
+                {apiTestResult.details.map((detail, i) => (
+                  <li key={i} className="mt-1 break-all">{detail}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+      {/* FIM DO NOVO DISPLAY */}
 
       <div className="mb-4">
         <strong>Quantidade de números escolhidos: </strong>{numbers.length}<br/>
