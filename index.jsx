@@ -488,7 +488,7 @@ export default function MegaDesdobramentoApp() {
             setFetchStatus("none");
             setShowPage(null);
             setFilteredHidden(true);
-            setShowProvaveis(false);
+            setShowProvaveis(true);
           }} className="px-3 py-2 bg-red-500 text-white rounded">
             Limpar Tudo
           </button>
@@ -500,6 +500,16 @@ export default function MegaDesdobramentoApp() {
         <strong>Escolhidos:</strong> {numbers.join(", ") || "—"} <br />
         <strong>Total gerado:</strong> {desdobramento.length} &nbsp;|&nbsp; <strong>Filtrados:</strong> {filtered.length} &nbsp;|&nbsp; <strong>Removidos:</strong> {removedCount}
       </div>
+
+          {/* botão para mostrar/ocultar números prováveis (aparece logo abaixo do resultado verificado) */}
+          <div className="mt-3">
+            <button
+              onClick={() => setShowProvaveis((s) => !s)}
+              className="px-3 py-2 bg-purple-600 text-white rounded"
+            >
+              {showProvaveis ? "Ocultar Números Prováveis" : `Mostrar Números Prováveis (${numerosProvaveis.length || 0})`}
+            </button>
+          </div>
 
       {/* RESULTADO DA CHECAGEM - aparece logo antes das combinações */}
       {resultsChecked && resultsChecked.combos && (
@@ -527,16 +537,6 @@ export default function MegaDesdobramentoApp() {
                   </div>
                 );
               })}
-          </div>
-
-          {/* botão para mostrar/ocultar números prováveis (aparece logo abaixo do resultado verificado) */}
-          <div className="mt-3">
-            <button
-              onClick={() => setShowProvaveis((s) => !s)}
-              className="px-3 py-2 bg-purple-600 text-white rounded"
-            >
-              {showProvaveis ? "Ocultar Números Prováveis" : `Mostrar Números Prováveis (${numerosProvaveis.length || 0})`}
-            </button>
           </div>
         </div>
       )}
