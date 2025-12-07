@@ -1,22 +1,9 @@
-
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-// MegaDesdobramentoApp.jsx
-// Single-file React component (Tailwind-ready)
-// - Recebe números do usuário (6-20)
-// - Gera desdobramento (todas as combinações de 6)
-// - Filtra padrões ruins (sequências, todos abaixo de 32 ("datas"), todos pares/ímpares, sequências completas)
-// - Remove combinações que já saíram (consulta API pública da Caixa / fallback)
-// - Salva combinações válidas em localStorage
-// - Permite agendar/definir data-hora do sorteio e, após a data, checar resultados e mostrar quantidade de acertos
-
-// Observações:
-// - Este componente tenta buscar resultados históricos da Mega-Sena usando a API pública da Caixa
-//   (https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena) – caso a requisição seja bloqueada por CORS,
-//   o código trabalha com um fallback para outras APIs públicas ou pode ser usado por trás de um proxy.
-
-// Helper: gera combinações k de um array arr (retorna arrays ordenados)
+/* =========================
+   Helpers (combinações e filtros)
+   ========================= */
 function combinations(arr, k) {
   const n = arr.length;
   if (k > n) return [];
@@ -33,18 +20,14 @@ function combinations(arr, k) {
   return res;
 }
 
-// Helpers de filtro
 function isConsecutive(combo, minLength = 3) {
-  // verifica se existe uma sequência de pelo menos minLength números consecutivos (ex: 7,8,9)
   const sorted = combo.slice().sort((a, b) => a - b);
   let count = 1;
   for (let i = 1; i < sorted.length; i++) {
     if (sorted[i] === sorted[i - 1] + 1) {
       count++;
       if (count >= minLength) return true;
-    } else {
-      count = 1;
-    }
+    } else count = 1;
   }
   return false;
 }
@@ -52,421 +35,604 @@ function isConsecutive(combo, minLength = 3) {
 function allBelowOrEqual(combo, value = 31) {
   return combo.every((n) => n <= value);
 }
-
 function allEven(combo) {
   return combo.every((n) => n % 2 === 0);
 }
 function allOdd(combo) {
   return combo.every((n) => n % 2 === 1);
 }
-
 function isSimpleSequence(combo) {
-  // casos óbvios como 1,2,3,4,5,6 ou qualquer sequência completa de 6 números
   const s = combo.slice().sort((a, b) => a - b);
-  for (let i = 1; i < s.length; i++) {
-    if (s[i] !== s[i - 1] + 1) return false;
-  }
+  for (let i = 1; i < s.length; i++) if (s[i] !== s[i - 1] + 1) return false;
   return true;
 }
-
 function comboKey(combo) {
   return combo.slice().sort((a, b) => a - b).join(",");
 }
 
-const API_ENDPOINTS = [
-    "https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena",
-    "https://api.guidi.dev.br/loteria/megasena",
-    "https://lottolookup.com.br/api/megasena",
-    "https://apiloterias.com.br/megasena",
-];
+/* =========================
+   API config (Guidi)
+   ========================= */
+const BASE_CONCURSO = "https://api.guidi.dev.br/loteria/megasena";
+const URL_ULTIMO = `${BASE_CONCURSO}/ultimo`;
 
-
+/* =========================
+   App Component
+   ========================= */
 export default function MegaDesdobramentoApp() {
+  // inputs / states
   const [input, setInput] = useState("");
-  const [numbers, setNumbers] = useState([]);
+  const [numbers, setNumbers] = useState([]); // user selected numbers (1..60)
   const [desdobramento, setDesdobramento] = useState([]);
   const [filtered, setFiltered] = useState([]);
-  const [apiDraws, setApiDraws] = useState([]); // draws from API
-  const [drawDate, setDrawDate] = useState(""); // yyyy-mm-ddThh:mm
-  const [numerosProvaveis, setNumerosProvaveis] = useState([]);
-  const [resultsChecked, setResultsChecked] = useState([]);
+  const [apiDraws, setApiDraws] = useState([]); // cached draws from API
+  const [fetchStatus, setFetchStatus] = useState("none"); // none | ok | fail | loading
   const [loading, setLoading] = useState(false);
-  const [apiTestResult, setApiTestResult] = useState(null); // NOVO ESTADO
+  const [resultsChecked, setResultsChecked] = useState(null);
+  const [numerosProvaveis, setNumerosProvaveis] = useState([]);
+  const [provaveisCount, setProvaveisCount] = useState(30); // configurable by user
+  const [copied, setCopied] = useState(false);
+
+  // mostrar/ocultar blocos
+  const [showProvaveis, setShowProvaveis] = useState(false); // provaveis hidden by default
+  const [filteredHidden, setFilteredHidden] = useState(true); // combos hidden by default
+
+  // paginacao das combinações (50 em 50)
+  const COMBOS_PER_PAGE = 50;
+  const [showPage, setShowPage] = useState(null); // null = nenhuma página mostrada, 0-based index
+
   const STORAGE_KEY = "mega_desdobramento_games";
+  const DRAWS_CACHE_KEY = "mega_draws_cache";
+  const HISTORY_KEY = "mega_desdobramento_history";
 
   useEffect(() => {
-    // load saved combos from localStorage
+    // load cached combos (last generated)
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       try {
-        const parsed = JSON.parse(raw);
-        setFiltered(parsed);
+        setFiltered(JSON.parse(raw));
       } catch (e) {
         console.warn("localStorage parse error", e);
       }
     }
+    // load cached draws if exist
+    const cached = localStorage.getItem(DRAWS_CACHE_KEY);
+    if (cached) {
+      try {
+        setApiDraws(JSON.parse(cached));
+        setFetchStatus("ok");
+      } catch {}
+    }
   }, []);
 
-  // tentativa de buscar resultados históricos (usaremos esta lista para filtrar combinações já sorteadas)
+  /* -------------------------
+     When user types/pastes into input, update selection immediately
+     - parse numbers and setNumbers
+     - keep input as-is (so user can continue editing)
+     ------------------------- */
+  useEffect(() => {
+    const parts = String(input)
+      .split(/[ ,;]+/)
+      .map((t) => Number(t.trim()))
+      .filter((n) => Number.isInteger(n) && n >= 1 && n <= 60);
+    const unique = Array.from(new Set(parts)).slice(0, 20).sort((a, b) => a - b);
+    setNumbers(unique);
+  }, [input]);
+
+  /* -------------------------
+     API: fetchDraws (robusto)
+     ------------------------- */
   async function fetchDraws() {
     setLoading(true);
-    const endpoints = API_ENDPOINTS; // Usando a constante de endpoints
-    let draws = [];
-    for (const url of endpoints) {
+    setFetchStatus("loading");
+    let ultimo = null;
+    try {
+      const resUltimo = await fetch(URL_ULTIMO, { cache: "no-store" });
+      if (resUltimo.ok) {
+        const d = await resUltimo.json();
+        ultimo = d.numero ?? d.concurso ?? d.numeroDoConcurso ?? null;
+      }
+    } catch (e) {
+      // fallback handled below
+    }
+    if (!ultimo) {
+      setFetchStatus("fail");
+      setLoading(false);
+      return [];
+    }
+
+    // buscamos até 50 concursos (ou menos se não existirem)
+    const maxBack = 50;
+    const draws = [];
+    for (let n = ultimo; n > ultimo - maxBack; n--) {
       try {
-        const res = await fetch(url, { cache: "no-store" });
-        if (!res.ok) throw new Error(`status ${res.status}`);
-        const data = await res.json();
-        // data pode vir em formatos diferentes: array de concursos ou objeto com propriedade 'lista' ou 'dezenas'
-        if (Array.isArray(data)) {
-          draws = data;
-        } else if (data && data.listaDezenas) {
-          draws = data.listaDezenas; // hipótese
-        } else if (data && data.concursos) {
-          draws = data.concursos;
-        } else if (data && data[0] && data[0].dezenas) {
-          draws = data;
-        } else if (data && data.dezenas) {
-          // caso API retorne um concurso específico
-          draws = [data];
-        } else {
-          // tente extrair propriedades comuns
-          const maybe = Object.values(data).flat?.() || [];
-          if (maybe.length && maybe[0] && maybe[0].dezenas) draws = maybe;
+        const r = await fetch(`${BASE_CONCURSO}/${n}`, { cache: "no-store" });
+        if (!r.ok) continue;
+        const data = await r.json();
+        const rawDezenas =
+          data.dezenasSorteadasOrdemSorteio ||
+          data.dezenas ||
+          data.listaDezenas ||
+          data.numeros ||
+          data.resultado;
+        let arr = [];
+        if (Array.isArray(rawDezenas)) arr = rawDezenas.map(Number).filter((x) => Number.isInteger(x) && x >= 1 && x <= 60);
+        else if (typeof rawDezenas === "string") arr = rawDezenas.split(/[^0-9]+/).filter(Boolean).map(Number);
+        if (arr.length >= 6) {
+          draws.push({
+            concurso: data.numero ?? data.concurso ?? n,
+            date: data.dataApuracao ?? data.data ?? null,
+            dezenas: arr,
+          });
         }
-        if (draws.length) break; // sucesso
       } catch (e) {
-        // console.warn("fetch draws failed for", url, e);
+        continue;
       }
     }
-    // normalize draws -> array of {numero: <concurso>, data: 'yyyy-mm-dd', dezenas: [1..6]}
-    const normalized = draws
-      .map((d) => {
-        // possible shapes: {dezenas: ['01','02',...], numeroDoConcurso, dataApuracao}
-        const dezenas = d.dezenas || d.listaDezenas || d.numeros || d.premio || d.resultado || d; // fallback
-        let arr = [];
-        if (Array.isArray(d.dezenas)) arr = d.dezenas.map((z) => Number(String(z).padStart(2, "0")));
-        else if (Array.isArray(d.listaDezenas)) arr = d.listaDezenas.map(Number);
-        else if (Array.isArray(d.numeros)) arr = d.numeros.map(Number);
-        else if (Array.isArray(d)) arr = d.map(Number);
-        else if (d[0] && Array.isArray(d[0])) arr = d[0].map(Number);
-        else arr = [];
-        // if arr is empty but existe 'dezenas' string
-        if (!arr.length && typeof d.dezenas === "string") {
-          arr = d.dezenas.split(/[^0-9]+/).filter(Boolean).map(Number);
-        }
-        const date = d.dataApuracao || d.data || d.dataPorExtenso || d.dataSorteio || null;
-        const concurso = d.numeroDoConcurso || d.numero || d.concurso || d.id || null;
-        return { concurso, date, dezenas: arr };
-      })
-      .filter((x) => x.dezenas && x.dezenas.length >= 6);
 
-    setApiDraws(normalized);
+    if (!draws.length) {
+      setFetchStatus("fail");
+      setLoading(false);
+      return [];
+    }
+
+    draws.sort((a, b) => b.concurso - a.concurso);
+    setApiDraws(draws);
+    localStorage.setItem(DRAWS_CACHE_KEY, JSON.stringify(draws));
+    setFetchStatus("ok");
     setLoading(false);
-    return normalized;
+    return draws;
   }
 
-  // gera desdobramento: todas as combinações de 6 números a partir dos números escolhidos
+  /* -------------------------
+     gerar desdobramento e aplicar filtros
+     ------------------------- */
   function gerarDesdobramentoFromNumbers(nums) {
-    if (nums.length < 6) return [];
-    const combs = combinations(nums.slice().sort((a, b) => a - b), 6);
+    if (!Array.isArray(nums)) nums = [];
+    const uniq = Array.from(new Set(nums)).sort((a, b) => a - b);
+    if (uniq.length < 6) return [];
+    const combs = combinations(uniq, 6);
     setDesdobramento(combs);
+    setFilteredHidden(true);
+    setShowPage(null);
     return combs;
   }
 
-  // aplicar filtros sobre um conjunto de combinações
   function aplicarFiltros(combs, drawsNormalized = []) {
-    const pastSet = new Set(drawsNormalized.map((d) => comboKey(d.dezenas.slice(0, 6))));
-    const filtered = [];
+    const pastSet = new Set((drawsNormalized || []).map((d) => comboKey(d.dezenas.slice(0, 6))));
+    const out = [];
     for (const c of combs) {
       const key = comboKey(c);
-      // 1) remover se a combinação já saiu
       if (pastSet.has(key)) continue;
-      // 2) remover sequências completas de 6
       if (isSimpleSequence(c)) continue;
-      // 3) remover se tiver sequência de 3 ou mais números consecutivos (configurável)
       if (isConsecutive(c, 3)) continue;
-      // 4) remover se todos estão abaixo ou iguais a 31 (evitar datas)
       if (allBelowOrEqual(c, 31)) continue;
-      // 5) remover todos pares ou todos ímpares
       if (allEven(c) || allOdd(c)) continue;
-      filtered.push(c);
+      out.push(c);
     }
-    return filtered;
+    return out;
   }
 
   async function handleGenerate(e) {
     e && e.preventDefault();
-    // parse input numbers
+    setCopied(false);
+
     const parts = input
       .split(/[ ,;]+/)
       .map((t) => Number(t.trim()))
       .filter((n) => Number.isInteger(n) && n >= 1 && n <= 60);
+
     const unique = Array.from(new Set(parts)).sort((a, b) => a - b);
     if (unique.length < 6) {
       alert("Insira ao menos 6 números válidos entre 1 e 60.");
       return;
     }
     if (unique.length > 20) {
-      alert("Máximo 20 números permitidos pelo volante (o desdobramento pode ficar muito grande).\nPor favor reduza para no máximo 20 números.");
+      alert("Máximo 20 números permitidos.");
       return;
     }
+
     setNumbers(unique);
     setLoading(true);
+
     const combs = gerarDesdobramentoFromNumbers(unique);
-    // buscar resultados históricos para remover combinações já sorteadas
-    const draws = await fetchDraws();
+
+    // garante draws: se já tiver cache usa, se não tenta buscar
+    const draws = apiDraws.length ? apiDraws : await fetchDraws();
+
     const final = aplicarFiltros(combs, draws);
     setFiltered(final);
-    // salvar entrada completa no histórico
-    const historyKey = "mega_desdobramento_history";
-    const entry = { inputNumbers: unique, totalCombinacoes: combs.length, totalFiltradas: final.length, totalRemovidas: combs.length - final.length, geradoEm: new Date().toISOString() };
-    const prev = JSON.parse(localStorage.getItem(historyKey) || "[]");
+
+    // salvar histórico e atual
+    const entry = {
+      inputNumbers: unique,
+      totalCombinacoes: combs.length,
+      totalFiltradas: final.length,
+      totalRemovidas: combs.length - final.length,
+      geradoEm: new Date().toISOString(),
+    };
+    const prev = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
     prev.push(entry);
-    localStorage.setItem(historyKey, JSON.stringify(prev));
-    // salvar em localStorage
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(prev));
     localStorage.setItem(STORAGE_KEY, JSON.stringify(final));
+
+    // reset page visibility
+    setFilteredHidden(true);
+    setShowPage(null);
+
     setLoading(false);
   }
 
-  // verifica se alguma combinação obteve 4/5/6 acertos contra um concurso específico
+  /* -------------------------
+     checar resultados (último concurso)
+     ------------------------- */
   function checkCombosAgainstDraw(combos, drawDezenas) {
-    const drawSet = new Set(drawDezenas.map((n) => Number(n)));
+    const setD = new Set(drawDezenas);
     return combos.map((c) => {
-      const hits = c.reduce((acc, n) => acc + (drawSet.has(n) ? 1 : 0), 0);
+      const hits = c.reduce((acc, n) => acc + (setD.has(n) ? 1 : 0), 0);
       return { combo: c.slice().sort((a, b) => a - b), hits };
     });
   }
 
   async function handleCheckResults() {
+    if (!filtered || !filtered.length) return alert("Não há combinações geradas para checar.");
     setLoading(true);
-    // tenta buscar último concurso (mesma função de fetchDraws)
-    const draws = await fetchDraws();
+    const draws = apiDraws.length ? apiDraws : await fetchDraws();
     if (!draws.length) {
-      alert("Não foi possível obter resultados históricos (verifique CORS ou conexão). Veja logs no console.");
       setLoading(false);
-      return;
+      return alert("Nenhum concurso disponível para checagem.");
     }
-    const latest = draws[0]; // assumimos que o array vem do mais recente para o mais antigo
-    if (!latest || !latest.dezenas || latest.dezenas.length < 6) {
-      alert("Formato inesperado do resultado retornado pela API.");
-      setLoading(false);
-      return;
-    }
-    const check = checkCombosAgainstDraw(filtered, latest.dezenas.slice(0, 6));
-    setResultsChecked({ concurso: latest.concurso || "último", date: latest.date, combos: check });
+    const latest = draws[0];
+    const check = checkCombosAgainstDraw(filtered, latest.dezenas);
+    setResultsChecked({ concurso: latest.concurso, date: latest.date, combos: check });
     setLoading(false);
   }
 
-  function downloadJSON() {
-    const data = { numbers, generatedAt: new Date().toISOString(), combos: filtered };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "mega_desdobramento.json";
-    a.click();
-    URL.revokeObjectURL(url);
+  /* -------------------------
+     calcular provaveis (quantidade configurável)
+     ------------------------- */
+  async function calcularProvaveis() {
+    setCopied(false);
+    setLoading(true);
+    const draws = apiDraws.length ? apiDraws : await fetchDraws();
+    if (!draws.length) {
+      setLoading(false);
+      return alert("Nenhum dado histórico disponível. Execute 'Atualizar concursos' ou busque um range.");
+    }
+    const freq = Array(61).fill(0);
+    draws.forEach((d) => {
+      (d.dezenas || []).forEach((n) => {
+        if (Number.isInteger(n) && n >= 1 && n <= 60) freq[n]++;
+      });
+    });
+    // ranking
+    const ranking = Array.from({ length: 60 }, (_, i) => i + 1).sort((a, b) => freq[b] - freq[a] || a - b);
+    const top = Math.max(1, Math.min(60, Number(provaveisCount) || 30));
+    setNumerosProvaveis(ranking.slice(0, top));
+    setLoading(false);
   }
 
-  function clearStorage() {
-    localStorage.removeItem(STORAGE_KEY);
-    setFiltered([]);
-    setDesdobramento([]);
-    setNumbers([]);
-    setInput("");
+  /* -------------------------
+     Copy helper for provaveis
+     ------------------------- */
+  async function copyProvaveisAsCSV() {
+    const txt = numerosProvaveis.join(", ");
+    try {
+      await navigator.clipboard.writeText(txt);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      alert("Não foi possível copiar automaticamente. Selecione e copie manualmente: " + txt);
+    }
   }
 
+  /* -------------------------
+     UI: volante interativo
+     ------------------------- */
+  function toggleNumber(n) {
+    setCopied(false);
+    setInput((prev) => prev); // keep input text (numbers sync via effect)
+    setNumbers((prev) => {
+      const exists = prev.includes(n);
+      if (exists) return prev.filter((x) => x !== n);
+      const next = [...prev, n].sort((a, b) => a - b);
+      if (next.length > 20) return prev;
+      return next;
+    });
+  }
+
+  // sync numbers -> input (string) only when numbers change programmatically and input is not focused
+  useEffect(() => {
+    if (numbers && numbers.length) {
+      if (!document.activeElement || document.activeElement.tagName !== "INPUT") {
+        setInput(numbers.join(" "));
+      }
+    } else {
+      if (!document.activeElement || document.activeElement.tagName !== "INPUT") {
+        setInput("");
+      }
+    }
+  }, [numbers]);
+
+  /* -------------------------
+     pagination helpers for filtered combos
+     ------------------------- */
+  const totalPages = Math.ceil(filtered.length / COMBOS_PER_PAGE);
+  function getPageCombos(pageIndex) {
+    if (!filtered || !filtered.length) return [];
+    const start = pageIndex * COMBOS_PER_PAGE;
+    return filtered.slice(start, start + COMBOS_PER_PAGE);
+  }
+
+  /* -------------------------
+     small helpers & computed
+     ------------------------- */
   const removedCount = desdobramento.length - filtered.length;
 
-  // CORREÇÃO: Função para calcular prováveis de forma robusta e assíncrona
-  async function calcularProvaveis() {
-    setLoading(true);
-    let currentDraws = apiDraws;
-    
-    // Se o estado 'apiDraws' estiver vazio, chama 'fetchDraws' e espera o resultado.
-    if (!currentDraws.length) {
-      currentDraws = await fetchDraws();
-    }
-    
-    if (!currentDraws.length) {
-      setLoading(false);
-      return alert("Não foi possível obter dados históricos para calcular a frequência. Por favor, tente novamente.");
-    }
-    
-    const freq = Array(61).fill(0);
-    currentDraws.forEach(d => d.dezenas.forEach(n => freq[n]++));
-    const ranked = [...Array(60).keys()].map(n=>n+1).sort((a,b)=>freq[b]-freq[a]);
-    setNumerosProvaveis(ranked.slice(0,30));
-    setLoading(false);
-  }
-
-  // NOVA FUNÇÃO: Testa o status de conexão das APIs
-  async function handleTestApi() {
-    setLoading(true);
-    const endpoints = API_ENDPOINTS;
-    let successUrl = null;
-    let errorDetails = [];
-
-    for (const url of endpoints) {
-        try {
-            // Usa o método HEAD para checar o status sem baixar o corpo
-            const res = await fetch(url, { method: "HEAD", cache: "no-store" }); 
-            if (res.ok) {
-                successUrl = url;
-                break;
-            } else {
-                errorDetails.push(`URL: ${url} | Status HTTP: ${res.status}`);
-            }
-        } catch (e) {
-            // Captura erros de rede/CORS
-            errorDetails.push(`URL: ${url} | Erro de Rede/CORS: ${e.message}`);
-        }
-    }
-    
-    setLoading(false);
-
-    if (successUrl) {
-        setApiTestResult({ status: 'Sucesso', url: successUrl });
-    } else {
-        setApiTestResult({ status: 'Falha', details: errorDetails });
-    }
-  }
-
+  /* -------------------------
+     JSX Render
+     ------------------------- */
   return (
     <div className="max-w-4xl mx-auto p-6">
-      <h1 className="text-2xl font-bold mb-4">Mega-Sena — Gerador de Desdobramento</h1>
-      <p className="mb-4 text-sm text-gray-600">
-        Insira entre 6 e 20 números (1–60). O app vai gerar todas as combinações possíveis de 6 (desdobramento),
-        filtrar padrões ruins e remover combinações que já saíram nos concursos históricos.
+      <h1 className="text-2xl font-bold mb-4">Mega-Sena — Desdobramento Inteligente</h1>
+
+      <p className="mb-3 text-sm text-gray-700">
+        Selecione números no volante (clique) ou digite/cole no campo — ao digitar o volante será atualizado automaticamente.
       </p>
 
-      <form onSubmit={handleGenerate} className="space-y-3 mb-4">
+      <form onSubmit={handleGenerate} className="space-y-3 mb-6">
         <label className="block">
-          <span className="text-sm font-medium">Números (separados por espaço, vírgula ou ponto e vírgula)</span>
+          <span className="text-sm font-medium">Números (digite ou use o volante)</span>
           <input
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="ex: 05 12 23 34 45 56"
-            className="mt-1 block w-full rounded-md border p-2"
+            onChange={(e) => {
+              setCopied(false);
+              setInput(e.target.value);
+            }}
+            placeholder="ex: 5 12 23 34 45 56"
+            className="mt-1 block w-full rounded border p-2"
           />
         </label>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={calcularProvaveis} disabled={loading} className="px-4 py-2 rounded bg-purple-600 text-white flex items-center gap-2 disabled:opacity-50">Números Prováveis (30+)</button>
-          <button type="submit" disabled={loading} className="px-4 py-2 rounded bg-blue-600 text-white flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}Gerar desdobramento</button>
-          <button type="button" onClick={fetchDraws} disabled={loading} className="px-4 py-2 rounded bg-gray-200 flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-gray-600 border-t-transparent rounded-full animate-spin"></span>}Atualizar concursos (fetch)</button>
-          
-          {/* NOVO BOTÃO DE TESTE */}
-          <button type="button" onClick={handleTestApi} disabled={loading} className="px-4 py-2 rounded bg-yellow-600 text-white flex items-center gap-2 disabled:opacity-50">Testar APIs</button>
-          
-          <button type="button" onClick={downloadJSON} className="px-4 py-2 rounded bg-green-600 text-white">Baixar JSON</button>
-          <button type="button" onClick={clearStorage} className="px-4 py-2 rounded bg-red-500 text-white">Limpar</button>
+
+        {/* volante */}
+        <div className="grid grid-cols-10 gap-1 mb-2">
+          {Array.from({ length: 60 }, (_, i) => i + 1).map((n) => {
+            const active = numbers.includes(n);
+            return (
+              <button
+                key={n}
+                type="button"
+                onClick={() => toggleNumber(n)}
+                className={`p-2 text-xs rounded ${active ? "bg-blue-600 text-white" : "bg-white text-gray-800 border"} hover:scale-105 transition`}
+              >
+                {n}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* ações e opções */}
+        <div className="flex flex-wrap gap-2 items-center">
+          <button
+            type="submit"
+            disabled={loading}
+            className="px-4 py-2 bg-blue-600 text-white rounded disabled:opacity-50 flex items-center gap-2"
+          >
+            {loading && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />}
+            Gerar Desdobramento
+          </button>
+
+          <button
+            type="button"
+            onClick={fetchDraws}
+            disabled={loading}
+            className="px-4 py-2 bg-gray-200 rounded disabled:opacity-50"
+          >
+            {fetchStatus === "ok" ? "✔ Concursos carregados" : fetchStatus === "loading" ? "Buscando..." : "Atualizar concursos"}
+          </button>
+
+          <button
+            type="button"
+            onClick={calcularProvaveis}
+            disabled={loading}
+            className="px-4 py-2 bg-purple-600 text-white rounded disabled:opacity-50"
+          >
+            {loading ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : "Gerar Números Prováveis"}
+          </button>
+
+          <div className="flex items-center gap-2">
+            <label className="text-sm">Qtd. prováveis:</label>
+            <input
+              type="number"
+              min="1"
+              max="60"
+              value={provaveisCount}
+              onChange={(e) => setProvaveisCount(Number(e.target.value))}
+              className="w-20 rounded border p-1 text-sm"
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={handleCheckResults}
+            disabled={loading}
+            className="px-3 py-2 bg-indigo-600 text-white rounded disabled:opacity-50"
+          >
+            Checar Último Concurso
+          </button>
+
+          <button type="button" onClick={() => {
+            const data = { numbers, generatedAt: new Date().toISOString(), combos: filtered };
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "mega_desdobramento.json";
+            a.click();
+            URL.revokeObjectURL(url);
+          }} className="px-3 py-2 bg-green-600 text-white rounded">
+            Baixar JSON
+          </button>
+
+          <button type="button" onClick={() => {
+            localStorage.removeItem(STORAGE_KEY);
+            localStorage.removeItem(DRAWS_CACHE_KEY);
+            localStorage.removeItem(HISTORY_KEY);
+            setFiltered([]);
+            setApiDraws([]);
+            setDesdobramento([]);
+            setNumbers([]);
+            setInput("");
+            setNumerosProvaveis([]);
+            setResultsChecked(null);
+            setFetchStatus("none");
+            setShowPage(null);
+            setFilteredHidden(true);
+            setShowProvaveis(false);
+          }} className="px-3 py-2 bg-red-500 text-white rounded">
+            Limpar Tudo
+          </button>
         </div>
       </form>
 
-      {/* NOVO DISPLAY DE RESULTADO DO TESTE DE API */}
-      {apiTestResult && (
-        <div className={`p-3 rounded mb-4 ${apiTestResult.status === 'Sucesso' ? 'bg-green-100 border-green-400' : 'bg-red-100 border-red-400'} border-l-4`}>
-          <h2 className="font-bold text-lg mb-1">Resultado do Teste de API: <span className={apiTestResult.status === 'Sucesso' ? 'text-green-700' : 'text-red-700'}>{apiTestResult.status}</span></h2>
-          {apiTestResult.status === 'Sucesso' ? (
-            <p className="text-sm">Conexão bem-sucedida com a URL: <strong>{apiTestResult.url}</strong></p>
-          ) : (
-            <>
-              <p className="text-sm text-red-700 font-semibold mb-1">Nenhuma API respondeu corretamente. Detalhes das falhas:</p>
-              <ul className="list-disc pl-5 text-xs text-red-700">
-                {apiTestResult.details.map((detail, i) => (
-                  <li key={i} className="mt-1 break-all">{detail}</li>
-                ))}
-              </ul>
-            </>
-          )}
-        </div>
-      )}
-      {/* FIM DO NOVO DISPLAY */}
-
-      <div className="mb-4">
-        <strong>Quantidade de números escolhidos: </strong>{numbers.length}<br/>
-        <strong>Números escolhidos: </strong>{numbers.join(", ")} 
-        <br />
-        <strong>Combinações geradas (C(n,6)): </strong>{desdobramento.length}
-        <br />
-        <strong>Após filtros e remoção de resultados já sorteados: </strong>{filtered.length}
-        <br />
-        <strong>Combinações removidas pelos filtros: </strong>{removedCount}
+      {/* indicadores */}
+      <div className="mb-4 text-sm">
+        <strong>Escolhidos:</strong> {numbers.join(", ") || "—"} <br />
+        <strong>Total gerado:</strong> {desdobramento.length} &nbsp;|&nbsp; <strong>Filtrados:</strong> {filtered.length} &nbsp;|&nbsp; <strong>Removidos:</strong> {removedCount}
       </div>
 
-      <div className="mb-6">
-        <h2 className="font-semibold">Amostra das combinações filtradas (primeiras 200)</h2>
-        <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {filtered.slice(0, 200).map((c, i) => (
-            <div key={i} className="p-2 border rounded">{c.slice().sort((a,b)=>a-b).join(", ")}</div>
-          ))}
-        </div>
-      </div>
+      {/* RESULTADO DA CHECAGEM - aparece logo antes das combinações */}
+      {resultsChecked && resultsChecked.combos && (
+        <div className="mb-6 p-3 border rounded bg-gray-50">
+          <h3 className="font-semibold">Resultado verificado — Concurso {resultsChecked.concurso}</h3>
+          <div className="text-sm text-gray-700">Data: {resultsChecked.date || "—"}</div>
+          <div className="mt-2">
+            <ul className="list-disc pl-6">
+              <li>6 acertos: {resultsChecked.combos.filter((c) => c.hits === 6).length}</li>
+              <li>5 acertos: {resultsChecked.combos.filter((c) => c.hits === 5).length}</li>
+              <li>4 acertos: {resultsChecked.combos.filter((c) => c.hits === 4).length}</li>
+            </ul>
+          </div>
 
-      <div className="mb-6">
-        <h2 className="font-semibold">Verificar resultados</h2>
-        <p className="text-sm text-gray-600 mb-2">Defina a data/hora do sorteio (opcional) ou clique para checar o último concurso agora:</p>
-        <div className="flex gap-2 mb-2">
-          <input type="datetime-local" value={drawDate} onChange={(e)=>setDrawDate(e.target.value)} className="rounded border p-2" />
-          <button type="button" onClick={handleCheckResults} disabled={loading} className="px-4 py-2 rounded bg-indigo-600 text-white flex items-center gap-2 disabled:opacity-50">{loading && <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>}Checar agora</button>
-        </div>
-        <div className="text-sm text-gray-600">
-          {drawDate && new Date(drawDate) > new Date() ? (
-            <div>Data do sorteio definida para: {new Date(drawDate).toLocaleString()}</div>
-          ) : drawDate ? (
-            <div>Data do sorteio ({new Date(drawDate).toLocaleString()}) já passou — você pode checar os resultados.</div>
-          ) : null}
-        </div>
-      </div>
+          {/* combinações com 4+ acertos — cores diferentes */}
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {resultsChecked.combos
+              .filter((c) => c.hits >= 4)
+              .map((c, i) => {
+                const bg =
+                  c.hits === 6 ? "bg-yellow-100" : c.hits === 5 ? "bg-green-100" : "bg-blue-100";
+                return (
+                  <div key={i} className={`${bg} p-2 border rounded`}>
+                    {c.combo.join(", ")} — <strong>{c.hits}</strong> acertos
+                  </div>
+                );
+              })}
+          </div>
 
-      <div>
-        {loading && <div className="text-sm text-gray-600 mb-2">Processando...</div>}
-        {resultsChecked && resultsChecked.combos && (
-          <div>
-            <h3 className="font-semibold">Resultado verificado — concurso: {resultsChecked.concurso} — data: {resultsChecked.date}</h3>
-            <div className="mt-2">
-              <strong>Resumo:</strong>
-              <ul className="list-disc pl-6">
-                <li>Combinações com 6 acertos: {resultsChecked.combos.filter(c=>c.hits===6).length}</li>
-                <li>Combinações com 5 acertos: {resultsChecked.combos.filter(c=>c.hits===5).length}</li>
-                <li>Combinações com 4 acertos: {resultsChecked.combos.filter(c=>c.hits===4).length}</li>
-              </ul>
-            </div>
-            <div className="mt-4">
-              <h4 className="font-medium">Listagem (apenas combos com 4+ acertos)</h4>
-              <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {resultsChecked.combos.filter(c=>c.hits>=4).map((c,i)=> (
-                  <div key={i} className="p-2 border rounded">{c.combo.join(", ")} — {c.hits} acertos</div>
-                ))}
-              </div>
-
-      {numerosProvaveis.length > 0 && (
-        <div className="mt-6 p-4 border rounded bg-purple-50">
-          <h3 className="font-semibold mb-2">30 números mais prováveis</h3>
-          <p className="text-sm mb-2 text-gray-700">Com base na frequência histórica.</p>
-          <div className="grid grid-cols-6 gap-2 text-center">
-            {numerosProvaveis.map((n,i)=>(
-              <div key={i} className="p-2 bg-white border rounded">{n}</div>
-            ))}
+          {/* botão para mostrar/ocultar números prováveis (aparece logo abaixo do resultado verificado) */}
+          <div className="mt-3">
+            <button
+              onClick={() => setShowProvaveis((s) => !s)}
+              className="px-3 py-2 bg-purple-600 text-white rounded"
+            >
+              {showProvaveis ? "Ocultar Números Prováveis" : `Mostrar Números Prováveis (${numerosProvaveis.length || 0})`}
+            </button>
           </div>
         </div>
       )}
-    </div></div>
+
+      {/* NÚMEROS PROVÁVEIS (AGORA AQUI, OCULTOS POR PADRÃO) */}
+      {showProvaveis && numerosProvaveis && numerosProvaveis.length > 0 && (
+        <div className="mb-6 p-3 border rounded bg-purple-50">
+          <h3 className="font-semibold">Números Prováveis ({numerosProvaveis.length})</h3>
+          <div className="mt-2 mb-2 grid grid-cols-6 gap-2">
+            {numerosProvaveis.map((n, i) => (
+              <div key={i} className="p-2 bg-white border rounded text-center">{n}</div>
+            ))}
+          </div>
+
+          <div className="flex gap-2 items-center mt-2">
+            <div className="text-sm">Lista:</div>
+            <div className="flex-1 p-2 border rounded bg-gray-50 text-sm">{numerosProvaveis.join(", ")}</div>
+            <button onClick={copyProvaveisAsCSV} className="px-3 py-2 bg-blue-600 text-white rounded">
+              {copied ? "Copiado!" : "Copiar lista"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* amostra de combos - ocultas por padrão e paginadas 50x */}
+      <div className="mb-6">
+        <h3 className="font-semibold mb-2">Combinações filtradas (ocultas por padrão)</h3>
+
+        {filtered.length === 0 ? (
+          <div className="text-sm text-gray-600">Nenhuma combinação gerada ainda.</div>
+        ) : (
+          <>
+            <div className="flex gap-2 items-center mb-3">
+              <div className="text-sm">Mostrar combinações por página (50):</div>
+              <div className="flex gap-1 flex-wrap">
+                {Array.from({ length: totalPages }, (_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => {
+                      setShowPage(i);
+                      setFilteredHidden(false);
+                      window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+                    }}
+                    className={`px-2 py-1 text-sm rounded border ${showPage === i ? "bg-blue-600 text-white" : "bg-white"}`}
+                  >
+                    Página {i + 1}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                onClick={() => {
+                  if (filteredHidden) {
+                    setShowPage(0);
+                    setFilteredHidden(false);
+                  } else {
+                    setShowPage(null);
+                    setFilteredHidden(true);
+                    window.scrollTo({ top: 0, behavior: "smooth" });
+                  }
+                }}
+                className="ml-3 px-3 py-1 rounded bg-gray-200 text-sm"
+              >
+                {filteredHidden ? "Mostrar (primeira página)" : "Ocultar combinações"}
+              </button>
+            </div>
+
+            {!filteredHidden && showPage !== null && (
+              <div>
+                <div className="text-xs text-gray-600 mb-2">Exibindo página {showPage + 1} de {totalPages} — combinações {showPage * COMBOS_PER_PAGE + 1} a {Math.min(filtered.length, (showPage + 1) * COMBOS_PER_PAGE)}</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {getPageCombos(showPage).map((c, i) => (
+                    <div key={i} className="p-2 border rounded text-sm">{c.join(", ")}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
-      <div className="mt-8 text-xs text-gray-500">
-        Nota técnica: o app tenta utilizar a API oficial disponibilizada pela Caixa para obter concursos
-        (endereço padrão: https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena). Em alguns ambientes
-        (ex.: execução local no navegador) essa requisição pode ser bloqueada por políticas de CORS. Se isso
-        acontecer, rode um pequeno proxy (ou use um servidor backend) para consultar a API e repassar ao
-        frontend. Veja também alternativas públicas que replicam os resultados (APIs de terceiros).
+      <div className="text-xs text-gray-500 mt-6">
+        Nota: o app usa a API Guidi (https://api.guidi.dev.br/loteria/megasena). Em alguns navegadores a chamada direta
+        pode ser bloqueada por CORS; se isso ocorrer, rode um proxy simples que repasse as requisições.
       </div>
     </div>
   );
 }
 
-const appRoot = document.querySelector( "#app_root" );
-!appRoot ? console.error( "appRoot not found" )
-  : createRoot( appRoot ).render( <MegaDesdobramentoApp /> );
+/* =========================
+   Render do App
+   ========================= */
+const appRoot = document.querySelector("#app_root");
+if (!appRoot) {
+  console.error("Elemento #app_root não encontrado — crie um <div id='app_root'></div> no HTML");
+} else {
+  createRoot(appRoot).render(<MegaDesdobramentoApp />);
+}
+
